@@ -102,6 +102,24 @@ export default class Decrypter {
     return this.webCryptoDecrypt(new Uint8Array(data), key, iv, aesMode);
   }
 
+  // Decrypts a chunk of a progressively loaded segment. Only software
+  // decryption supports partial data (WebCrypto requires complete segments).
+  // The result is staggered: each call emits the plaintext recovered from the
+  // previous chunk, and the final block is emitted by flush(), which also
+  // removes PKCS7 padding. Returns null when no plaintext can be emitted yet
+  // (first chunk, or less than one AES block of new data).
+  public decryptChunk(
+    data: Uint8Array,
+    key: ArrayBuffer,
+    iv: ArrayBuffer,
+    aesMode: DecrypterAesMode,
+  ): ArrayBuffer | null {
+    // decryptRange only applies to single-shot decryption of range-requested
+    // (init) segments, never to progressively loaded chunks
+    this.decryptRange = undefined;
+    return this.softwareDecrypt(data, key, iv, aesMode);
+  }
+
   // Software decryption is progressive. Progressive decryption may not return a result on each call. Any cached
   // data is handled in the flush() call
   private softwareDecrypt(

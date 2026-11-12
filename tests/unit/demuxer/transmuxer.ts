@@ -1,12 +1,17 @@
 import { expect, use } from 'chai';
 import sinon from 'sinon';
 import sinonChai from 'sinon-chai';
-import { TransmuxConfig, TransmuxState } from '../../../src/demux/transmuxer';
+import Decrypter from '../../../src/crypt/decrypter';
+import Transmuxer, {
+  TransmuxConfig,
+  TransmuxState,
+} from '../../../src/demux/transmuxer';
 import TransmuxerInterface from '../../../src/demux/transmuxer-interface';
 import Hls from '../../../src/hls';
 import { Fragment } from '../../../src/loader/fragment';
 import { PlaylistLevelType } from '../../../src/types/loader';
 import { ChunkMetadata } from '../../../src/types/transmuxer';
+import { logger } from '../../../src/utils/logger';
 import type { MediaFragment } from '../../../src/loader/fragment';
 import type { TransmuxerResult } from '../../../src/types/transmuxer';
 
@@ -339,5 +344,75 @@ describe('TransmuxerInterface tests', function () {
     const spy = sinon.spy(hls.logger, 'log');
     transmuxerInterfacePrivates.onWorkerMessage(evt);
     expect(spy).to.have.been.calledWith(evt.data.data.message);
+  });
+
+  describe('full-segment decryption routing', function () {
+    const decryptdata = {
+      method: 'AES-128',
+      key: new Uint8Array(16),
+      iv: new Uint8Array(16),
+    } as any;
+
+    const createTransmuxer = (progressive: boolean) => {
+      const transmuxer = new Transmuxer(
+        { emit: sinon.spy() } as any,
+        {} as any,
+        { progressive, enableSoftwareAES: true } as any,
+        '',
+        PlaylistLevelType.MAIN,
+        logger,
+      );
+      transmuxer.configure(
+        new TransmuxConfig(undefined, undefined, undefined, 0),
+      );
+      return transmuxer;
+    };
+
+    it('decrypts chunks progressively with software AES when progressive is enabled', function () {
+      const decryptChunkSpy = sinon.spy(Decrypter.prototype, 'decryptChunk');
+      const decryptSpy = sinon.spy(Decrypter.prototype, 'decrypt');
+      const resetSpy = sinon.spy(Decrypter.prototype, 'reset');
+      const transmuxer = createTransmuxer(true);
+      const state = new TransmuxState(false, false, true, false, 0, false);
+      const data = new ArrayBuffer(64);
+
+      const firstResult = transmuxer.push(
+        data,
+        decryptdata,
+        new ChunkMetadata(0, 1, 1, 64, -1, false),
+        state,
+      ) as TransmuxerResult;
+      // the first chunk only primes the decrypter; plaintext is staggered
+      expect(firstResult.remuxResult).to.deep.equal({});
+      const secondResult = transmuxer.push(
+        data,
+        decryptdata,
+        new ChunkMetadata(0, 1, 2, 64, -1, false),
+        state,
+      ) as TransmuxerResult;
+      expect(secondResult.chunkMeta.id).to.equal(2);
+
+      expect(decryptChunkSpy).to.have.been.calledTwice;
+      expect(decryptSpy).to.not.have.been.called;
+      // decrypter state is reset on the first chunk of a segment only
+      expect(resetSpy).to.have.been.calledOnce;
+    });
+
+    it('decrypts in a single shot when progressive is disabled', async function () {
+      const decryptStub = sinon
+        .stub(Decrypter.prototype, 'decrypt')
+        .returns(Promise.resolve(new ArrayBuffer(0)));
+      const decryptChunkSpy = sinon.spy(Decrypter.prototype, 'decryptChunk');
+      const transmuxer = createTransmuxer(false);
+      const state = new TransmuxState(false, false, true, false, 0, false);
+      await transmuxer.push(
+        new ArrayBuffer(64),
+        decryptdata,
+        new ChunkMetadata(0, 1, 1, 64, -1, false),
+        state,
+      );
+      expect(decryptStub).to.have.been.calledOnce;
+      expect(decryptChunkSpy).to.not.have.been.called;
+    });
   });
 });

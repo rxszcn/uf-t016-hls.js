@@ -2,6 +2,7 @@ import AACDemuxer from './audio/aacdemuxer';
 import { AC3Demuxer } from './audio/ac3-demuxer';
 import MP3Demuxer from './audio/mp3demuxer';
 import Decrypter from '../crypt/decrypter';
+import { DecrypterAesMode } from '../crypt/decrypter-aes-mode';
 import MP4Demuxer from '../demux/mp4demuxer';
 import TSDemuxer from '../demux/tsdemuxer';
 import { ErrorDetails, ErrorTypes } from '../errors';
@@ -124,6 +125,36 @@ export default class Transmuxer {
     if (keyData && isFullSegmentEncryption(keyData.method)) {
       const decrypter = this.getDecrypter();
       const aesMode = getAesModeFromFullSegmentMethod(keyData.method);
+      if (
+        this.config.progressive &&
+        !chunkMeta.partial &&
+        !chunkMeta.decryptRange &&
+        aesMode === DecrypterAesMode.cbc &&
+        keyData.key.byteLength === 16
+      ) {
+        // Progressive loading: decrypt chunks as they arrive. Only software
+        // decryption supports partial data (WebCrypto requires a complete
+        // segment). Plaintext is staggered by one chunk; the final block is
+        // emitted by Decrypter.flush() from Transmuxer.flush() at the end of
+        // the segment, which also removes PKCS7 padding.
+        if (chunkMeta.id === 1) {
+          // First chunk of a segment: clear any state left over from a
+          // previous (possibly aborted) segment, so that the CBC chain starts
+          // from the segment IV
+          decrypter.reset();
+        }
+        const decryptedData = decrypter.decryptChunk(
+          uintData,
+          keyData.key.buffer,
+          keyData.iv.buffer,
+          aesMode,
+        );
+        if (decryptedData) {
+          // Push always returns a TransmuxerResult if decryptdata is null
+          return this.push(decryptedData, null, chunkMeta);
+        }
+        return emptyResult(chunkMeta);
+      }
       this.asyncResult = true;
       this.decryptionPromise = decrypter
         .decrypt(
